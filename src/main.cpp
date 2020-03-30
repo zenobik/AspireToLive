@@ -9,13 +9,11 @@
 #define stopButt 9
 #define endStop 8
 
+#define encA 2
+#define encB 3
+#define encS 4
 
-#define encVolumeA 2
-#define encVolumeB 3
-#define encRatioA 4
-#define encRatioB 5
-#define encIeA 6
-#define encIeB 7
+#define o2Sensor A0
 
 float reduction = 5.18;
 float stepsPerRev = 400;
@@ -57,7 +55,8 @@ uint8_t stopFlag=1;
 void recalculateParameters(void);
 void calibrateMotor(void);
 void checkUI(void);
-void redrawUI(uint8_t stop);
+void redrawUI(uint8_t stop, uint8_t nPos);
+void updateSensor(void);
 
 // Define a stepper and the pins it will use
 AccelStepper stepper(AccelStepper::DRIVER, stepPin, dirPin, enablePin);
@@ -68,12 +67,9 @@ void setup() {
   stepper.setMaxSpeed(speedMax);
   stepper.setAcceleration(acceleration);
 
-  pinMode(encVolumeA, INPUT_PULLUP);
-  pinMode(encVolumeB, INPUT_PULLUP);
-  pinMode(encRatioA, INPUT_PULLUP);
-  pinMode(encRatioB, INPUT_PULLUP);
-  pinMode(encIeA, INPUT_PULLUP);
-  pinMode(encIeB, INPUT_PULLUP);
+  pinMode(encA, INPUT_PULLUP);
+  pinMode(encB, INPUT_PULLUP);
+  pinMode(encS, INPUT_PULLUP);
 
   pinMode(endStop, INPUT_PULLUP);
   pinMode(stopButt, INPUT_PULLUP);
@@ -89,21 +85,25 @@ void setup() {
 
   calibrateMotor();
   recalculateParameters();
-  redrawUI(1);
+  redrawUI(1,0);
 }
 
 void loop() {
   if(stopFlag) {
+    static unsigned long lastMillis=0;
     checkUI();
-    delay(20);
     if(changeFlag) {
       recalculateParameters();
       changeFlag=0;
     }
     if(digitalRead(stopButt)==LOW &&  (entryMillis+1000)<millis()) {
       stopFlag=0;
-      redrawUI(0);
+      redrawUI(0,0);
       entryMillis=millis();
+    }
+    if(lastMillis+1000<millis()) {
+      updateSensor();
+      lastMillis = millis();
     }
   } else {      
     //set target speed for inspiratory phase
@@ -119,107 +119,136 @@ void loop() {
     while(stepper.distanceToGo() != 0) {
       stepper.run();
     }
-    unsigned long target = millis() + expiratoryTime - expiratoryTimeSubtract;
+    unsigned long target = millis() + expiratoryTime;
+    uint8_t once=0;
     while(millis()<target){
       if(digitalRead(stopButt)==LOW && (entryMillis+1000)<millis()) {
         stopFlag=1;
-        redrawUI(1);
+        redrawUI(1,0);
         entryMillis=millis();
         break;
+      }
+      if(!once) {
+        updateSensor();
+        once++;
       }
     }    
   }  
 }
 
-void redrawUI(uint8_t stop) {
+void redrawUI(uint8_t stop, uint8_t nPos) {
   lcd.clear();
   lcd.home();
-  lcd.setCursor(0,1);
+  lcd.setCursor(1,0);  
+  lcd.print("O2: ");
+  lcd.setCursor(10,0);  
+  lcd.print("%");
+  updateSensor();
+  lcd.setCursor(1,1);
   lcd.print("Rate: ");
   lcd.print((int)freq);
   lcd.print("/min");
 
-  lcd.setCursor(0,2);
+  lcd.setCursor(1,2);
   lcd.print("Volume: ");
   lcd.print((int)airVolume);
   lcd.print("%");
 
-  lcd.setCursor(0,3);
+  lcd.setCursor(1,3);
   lcd.print("I/E: ");
   lcd.print((int)inspiratory_factor);
   lcd.print("/");
   lcd.print((int)expiratory_factor);
 
+  
+
   if(stop) {    
+    lcd.setCursor(0,nPos+1);
+    lcd.print('>');
     lcd.setCursor(16,3);
     lcd.print("EDIT");
   }
 }
 
+void updateSensor(void) {
+  static int sum=0;
+  uint8_t i=0;
+  for(i=0;i<32;i++) {    
+    sum+=analogRead(o2Sensor);
+  }
+  sum >>= 5;
+  i=0;
+  float MeasuredVout = sum * (5.0 / 1023.0);
+  float Concentration = MeasuredVout * 0.21 / 2.0;
+  lcd.setCursor(5,0);
+  lcd.print("    ");
+  lcd.setCursor(5,0);
+  lcd.print(Concentration*100.0);  
+}
+
 void checkUI(void) {
+  static uint8_t nPos = 0;
+  static int encLastS = HIGH;
+  static unsigned long encLastMil = 0;
+
+  int currState = digitalRead(encS);
+
+  if(encLastS == HIGH && currState == LOW && encLastMil+120<millis()) {
+    encLastMil = millis();
+    if(nPos<2)
+      nPos++;
+    else 
+      nPos=0;
+    redrawUI(1,nPos);
+  }
+  encLastS = currState;
+
   static uint8_t iePos=0;
-
-  static int encVolumeLastA = digitalRead(encVolumeA);
-  static int encRatioLastA = digitalRead(encRatioA);
-  static int encIeLastA = digitalRead(encIeA);
-  static unsigned long lastVolumeMil=0;
-  static unsigned long lastRatioMil=0;
-  static unsigned long lastIeMil=0;
-
-
-  if(millis()>lastVolumeMil+70) {
-    int currState = digitalRead(encVolumeA);
-    if (currState != encVolumeLastA){
-      if (digitalRead(encVolumeB) != currState) { 
-        if(airVolume<100) airVolume++;
-      } else {       
-        if(airVolume>5) airVolume--;
-      }
-      lastVolumeMil=millis();
-      redrawUI(1);
-      changeFlag=1;     
+  static int encLastA = HIGH;
+  int change=0;
+  currState = digitalRead(encA);
+  if (encLastA == HIGH && currState == LOW){
+    if (digitalRead(encB) == HIGH) { 
+      change=1;
+    } else {
+      change=-1;
     }
-    encVolumeLastA = currState;
-  }
 
-  if(millis()>lastRatioMil+70) {
-    int currState = digitalRead(encRatioA);
-    if (currState != encRatioLastA){
-      if (digitalRead(encRatioB) != currState) { 
-        if(freq<40) freq++;
-      } else {
-        if(freq>6)freq--;
+    switch (nPos) {
+      case 0: {
+        if(change>0 && freq<40) 
+          freq++;
+        else if(change<0 && freq>6)
+          freq--;
+        break;
       }
-      lastRatioMil=millis();
-      redrawUI(1);
-      changeFlag=1;
+      case 1: {
+        if(change>0 && airVolume<100)
+          airVolume++;
+        else if(change<0 && airVolume>5)
+          airVolume--;
+        break;
+      }
+      case 2: {
+        if(change>0 && iePos<4) 
+          iePos++;
+        else if(change<0 && iePos>0)
+          iePos--;
+
+        switch(iePos) {
+          case 0: inspiratory_factor=2;expiratory_factor=1; break;
+          case 1: inspiratory_factor=1;expiratory_factor=2; break;
+          case 2: inspiratory_factor=1;expiratory_factor=3; break;
+          case 3: inspiratory_factor=1;expiratory_factor=4; break;
+          case 4: inspiratory_factor=1;expiratory_factor=5; break;
+        }
+        break;
+      }
     }
-    encRatioLastA = currState;
-  }
-
-  
-  if(millis()>lastIeMil+70) {
-    int currState = digitalRead(encIeA);
-    if (currState != encIeLastA){
-      if (digitalRead(encIeB) != currState) { 
-        if(iePos<4)iePos++;
-      } else {
-        if(iePos>0)iePos--;
-      }
-
-      switch(iePos) {
-        case 0: inspiratoryTime=2;expiratoryTime=1; break;
-        case 1: inspiratoryTime=1;expiratoryTime=2; break;
-        case 2: inspiratoryTime=1;expiratoryTime=3; break;
-        case 3: inspiratoryTime=1;expiratoryTime=4; break;
-        case 4: inspiratoryTime=1;expiratoryTime=5; break;
-      }
-      lastIeMil=millis();
-      redrawUI(1);
-      changeFlag=1;
-    }
-    encIeLastA = currState;
-  }
+    redrawUI(1,nPos);
+    changeFlag=1;
+  }  
+  encLastA=currState;
 }
 
 void calibrateMotor(void) {
@@ -252,6 +281,7 @@ void calibrateMotor(void) {
     stepper.setCurrentPosition(0);
   }
 }
+
 void recalculateParameters(void) {
   //this will be calcuilated
   nSteps = (reduction) * (airVolume / 100) * stepsPerRev * (degreesPerFullStroke / 360.0);
@@ -262,5 +292,5 @@ void recalculateParameters(void) {
   //acceleration time is insignificant 
   speed = nSteps / inspiratoryTime;
   //calculate expiratory time and subtract motor return time (number of steps divided by max speed) [ms]
-  expiratoryTime = ((cycleTime/(inspiratory_factor+expiratory_factor)*expiratory_factor)-(nSteps/speedMax))*1000.0;
+  expiratoryTime = (((cycleTime/(inspiratory_factor+expiratory_factor)*expiratory_factor)-(nSteps/speedMax))*1000.0) - expiratoryTimeSubtract;
 }
